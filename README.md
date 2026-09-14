@@ -119,6 +119,53 @@ You should see at least:
 - `Save-PlanetCrafterServer`
 - `Complete-PlanetCrafterServerIntro`
 
+## Publish a new version to PowerShell Gallery
+
+This repository is set up to publish when a version tag is pushed to GitHub.
+
+### 1. Bump the module version on main
+
+From the repository root, run:
+
+```powershell
+pwsh ./scripts/Update-ModuleVersion.ps1 -NewVersion 0.1.1
+```
+
+The helper script renames the current module folder to the new version and updates both the manifest and the in-module version variable.
+
+### 2. Commit the version bump
+
+```bash
+git add .
+git commit -m "Bump module version to 0.1.1"
+```
+
+### 3. Create and push the matching tag
+
+```bash
+git tag v0.1.1
+git push origin main --tags
+```
+
+The GitHub Actions workflow watches for tags like `v*.*.*` and validates that the tag version matches the manifest before publishing to PowerShell Gallery.
+
+### 4. Add the PowerShell Gallery API key secret
+
+Before the first publish, create a PowerShell Gallery account and generate an API key:
+
+1. Sign in to https://www.powershellgallery.com
+2. Click your account name and open `My Account`
+3. Create or manage an API key
+4. In GitHub, open the repository and go to `Settings` -> `Secrets and variables` -> `Actions`
+5. Add a repository secret named `PSGALLERY_API_KEY`
+6. Paste the PowerShell Gallery API key as the secret value
+
+> The first time you publish a new module package, the gallery may require you to claim or create the package namespace. If the module name is not yet owned by your account, the gallery will prompt for that setup before the first upload.
+
+### 5. Verify the release
+
+After the tag is pushed, GitHub Actions will run the publish job. You can watch the `Actions` tab in GitHub and then confirm the module appears on PowerShell Gallery.
+
 ## Recommended first server install
 
 For a first server, the simplest reliable path is:

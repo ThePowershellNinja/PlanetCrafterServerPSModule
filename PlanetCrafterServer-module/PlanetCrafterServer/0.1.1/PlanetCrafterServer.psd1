@@ -1,6 +1,6 @@
 @{
     RootModule           = 'PlanetCrafterServer.psm1'
-    ModuleVersion        = '0.1.0'
+    ModuleVersion        = '0.1.1'
     GUID                 = '7a7d42d1-b6ea-4e62-b981-7299f4a178ce'
     Author               = 'GitHub Copilot'
     CompanyName          = 'GitHub'
@@ -30,3 +30,4 @@
         }
     }
 }
+

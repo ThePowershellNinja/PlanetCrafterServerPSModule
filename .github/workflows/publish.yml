@@ -1,0 +1,59 @@
+name: Publish to PowerShell Gallery
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate tag matches latest module version
+        shell: pwsh
+        run: |
+          $tagVersion = ('${{ github.ref_name }}').TrimStart('v')
+          $moduleRoot = Join-Path $PWD 'PlanetCrafterServer-module/PlanetCrafterServer'
+          $versionDir = Get-ChildItem -Path $moduleRoot -Directory |
+            Sort-Object { [version]$_.Name } |
+            Select-Object -Last 1
+
+          if (-not $versionDir) {
+            throw "No versioned module directory was found under $moduleRoot."
+          }
+
+          $manifestPath = Join-Path $versionDir.FullName 'PlanetCrafterServer.psd1'
+          $manifest = Import-PowerShellDataFile -Path $manifestPath
+
+          if ($manifest.ModuleVersion -ne $tagVersion) {
+            throw "Git tag '$tagVersion' does not match the module manifest version '$($manifest.ModuleVersion)'."
+          }
+
+          Write-Host "Validated tag $tagVersion against module version $($manifest.ModuleVersion)."
+
+      - name: Publish module to PowerShell Gallery
+        shell: pwsh
+        env:
+          PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PSGALLERY_API_KEY)) {
+            throw "Missing PSGALLERY_API_KEY secret in the repository settings."
+          }
+
+          $moduleRoot = Join-Path $PWD 'PlanetCrafterServer-module/PlanetCrafterServer'
+          $versionDir = Get-ChildItem -Path $moduleRoot -Directory |
+            Sort-Object { [version]$_.Name } |
+            Select-Object -Last 1
+
+          if (-not $versionDir) {
+            throw "No versioned module directory was found under $moduleRoot."
+          }
+
+          Publish-Module -Path $versionDir.FullName -Repository PSGallery -NuGetApiKey $env:PSGALLERY_API_KEY -Force
