@@ -10,7 +10,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -38,6 +38,34 @@ jobs:
 
           Write-Host "Validated tag $tagVersion against module version $($manifest.ModuleVersion)."
 
+      - name: Create release zip
+        shell: pwsh
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          $moduleVersion = $env:TAG_NAME.TrimStart('v')
+          $moduleRoot = Join-Path $PWD 'PlanetCrafterServer-module/PlanetCrafterServer'
+          $versionDir = Get-ChildItem -Path $moduleRoot -Directory |
+            Sort-Object { [version]$_.Name } |
+            Select-Object -Last 1
+
+          if (-not $versionDir) {
+            throw "No versioned module directory was found under $moduleRoot."
+          }
+
+          $workingRoot = Join-Path $env:RUNNER_TEMP "planet-crafter-release"
+          if (Test-Path -LiteralPath $workingRoot) {
+            Remove-Item -LiteralPath $workingRoot -Recurse -Force
+          }
+
+          $releaseDir = Join-Path $workingRoot 'PlanetCrafterServer'
+          New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+          Copy-Item -Path $versionDir.FullName -Destination $releaseDir -Recurse -Force
+
+          $zipPath = Join-Path $PWD "PlanetCrafterServer-v$moduleVersion.zip"
+          Compress-Archive -Path $releaseDir -DestinationPath $zipPath -Force
+          Write-Host "Created release zip at $zipPath"
+
       - name: Publish module to PowerShell Gallery
         shell: pwsh
         env:
@@ -57,3 +85,10 @@ jobs:
           }
 
           Publish-Module -Path $versionDir.FullName -Repository PSGallery -NuGetApiKey $env:PSGALLERY_API_KEY -Force
+
+      - name: Upload GitHub release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: PlanetCrafterServer-v${{ github.ref_name }}.zip
+          generate_release_notes: true
