@@ -16,20 +16,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate tag matches latest module version
+      - name: Validate tag matches module version
         shell: pwsh
         run: |
           $tagVersion = ('${{ github.ref_name }}').TrimStart('v')
           $moduleRoot = Join-Path $PWD 'PlanetCrafterServer-module/PlanetCrafterServer'
-          $versionDir = Get-ChildItem -Path $moduleRoot -Directory |
-            Sort-Object { [version]$_.Name } |
-            Select-Object -Last 1
-
-          if (-not $versionDir) {
-            throw "No versioned module directory was found under $moduleRoot."
-          }
-
-          $manifestPath = Join-Path $versionDir.FullName 'PlanetCrafterServer.psd1'
+          $manifestPath = Join-Path $moduleRoot 'PlanetCrafterServer.psd1'
           $manifest = Import-PowerShellDataFile -Path $manifestPath
 
           if ($manifest.ModuleVersion -ne $tagVersion) {
@@ -45,13 +37,6 @@ jobs:
         run: |
           $moduleVersion = $env:TAG_NAME.TrimStart('v')
           $moduleRoot = Join-Path $PWD 'PlanetCrafterServer-module/PlanetCrafterServer'
-          $versionDir = Get-ChildItem -Path $moduleRoot -Directory |
-            Sort-Object { [version]$_.Name } |
-            Select-Object -Last 1
-
-          if (-not $versionDir) {
-            throw "No versioned module directory was found under $moduleRoot."
-          }
 
           $workingRoot = Join-Path $env:RUNNER_TEMP "planet-crafter-release"
           if (Test-Path -LiteralPath $workingRoot) {
@@ -60,7 +45,7 @@ jobs:
 
           $releaseDir = Join-Path $workingRoot 'PlanetCrafterServer'
           New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
-          Copy-Item -Path $versionDir.FullName -Destination $releaseDir -Recurse -Force
+          Copy-Item -Path (Join-Path $moduleRoot '*') -Destination $releaseDir -Recurse -Force
 
           $zipPath = Join-Path $PWD "PlanetCrafterServer-v$moduleVersion.zip"
           Compress-Archive -Path $releaseDir -DestinationPath $zipPath -Force
@@ -76,15 +61,7 @@ jobs:
           }
 
           $moduleRoot = Join-Path $PWD 'PlanetCrafterServer-module/PlanetCrafterServer'
-          $versionDir = Get-ChildItem -Path $moduleRoot -Directory |
-            Sort-Object { [version]$_.Name } |
-            Select-Object -Last 1
-
-          if (-not $versionDir) {
-            throw "No versioned module directory was found under $moduleRoot."
-          }
-
-          Publish-Module -Path $versionDir.FullName -Repository PSGallery -NuGetApiKey $env:PSGALLERY_API_KEY -Force
+          Publish-Module -Path $moduleRoot -Repository PSGallery -NuGetApiKey $env:PSGALLERY_API_KEY -Force
 
       - name: Upload GitHub release asset
         uses: softprops/action-gh-release@v2

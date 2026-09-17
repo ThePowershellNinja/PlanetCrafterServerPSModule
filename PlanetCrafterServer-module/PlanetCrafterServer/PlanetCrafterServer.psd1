@@ -1,10 +1,10 @@
 @{
     RootModule           = 'PlanetCrafterServer.psm1'
-    ModuleVersion        = '0.1.1'
+    ModuleVersion        = '0.1.2'
     GUID                 = '7a7d42d1-b6ea-4e62-b981-7299f4a178ce'
-    Author               = 'GitHub Copilot'
-    CompanyName          = 'GitHub'
-    Copyright            = '(c) GitHub. All rights reserved.'
+    Author               = 'Micah Battin'
+    CompanyName          = ''
+    Copyright            = '(c) Micah Battin. All rights reserved.'
     Description          = 'Manage experimental Planet Crafter headless server installations on Windows.'
     PowerShellVersion    = '5.1'
     CompatiblePSEditions = @('Desktop', 'Core')
@@ -12,6 +12,7 @@
     FunctionsToExport    = @(
         'Get-PlanetCrafterServer',
         'Start-PlanetCrafterServer',
+        'Restart-PlanetCrafterServer',
         'New-PlanetCrafterServerSave',
         'Save-PlanetCrafterServer',
         'Complete-PlanetCrafterServerIntro',
@@ -30,4 +31,5 @@
         }
     }
 }
+
 

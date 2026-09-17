@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:ModuleVersion = '0.1.0'
+$script:ModuleVersion = '0.1.1'
 $script:GameAppId = 1284190
 $script:DefaultExecutableName = 'Planet Crafter.exe'
 $script:DefaultAssemblyRelativePath = 'Planet Crafter_Data\Managed\Assembly-CSharp.dll'
@@ -155,6 +155,47 @@ function Copy-PCSFileWithRetry {
     if ($lastError) {
         throw "Failed to replace '$DestinationPath' after $RetryCount attempts. The file appears to be locked by another process or service. Original error: $($lastError.Exception.Message)"
     }
+}
+
+function Remove-PCSDirectoryTree {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [int]$RetryCount = 5,
+        [int]$DelayMilliseconds = 500
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
+        try {
+            # Read-only attributes on Steam content can block deletion.
+            Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_.Attributes -band [System.IO.FileAttributes]::ReadOnly) {
+                    $_.Attributes = $_.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+                }
+            }
+
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+        }
+        catch {
+            $lastError = $_
+        }
+
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return
+        }
+
+        if ($attempt -lt $RetryCount) {
+            Start-Sleep -Milliseconds $DelayMilliseconds
+        }
+    }
+
+    $details = if ($lastError) { " Original error: $($lastError.Exception.Message)" } else { '' }
+    throw "Failed to delete folder '$Path' after $RetryCount attempts. Stop any process using it, close Explorer windows or previews, and retry.$details"
 }
 
 function Get-PCSSaveNewline {
@@ -578,6 +619,46 @@ function Invoke-PCSRobocopy {
     if ($LASTEXITCODE -ge 8) {
         throw "Robocopy failed from '$Source' to '$Destination' with exit code $LASTEXITCODE."
     }
+}
+
+function Get-PCSPowerShellHostPath {
+    # Prefers PowerShell 7 for out-of-process work, but Windows PowerShell can run it too.
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $candidates.Add((Join-Path $PSHOME 'pwsh.exe'))
+    }
+
+    $pwshCommand = Get-Command -Name 'pwsh.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($pwshCommand) {
+        $candidates.Add($pwshCommand.Source)
+    }
+
+    foreach ($programFiles in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($programFiles) {
+            $candidates.Add((Join-Path $programFiles 'PowerShell\7\pwsh.exe'))
+        }
+    }
+
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        $candidates.Add((Join-Path $PSHOME 'powershell.exe'))
+    }
+
+    $windowsPowerShellRoot = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+    $candidates.Add((Join-Path $windowsPowerShellRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'))
+
+    $powershellCommand = Get-Command -Name 'powershell.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($powershellCommand) {
+        $candidates.Add($powershellCommand.Source)
+    }
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return $candidate
+        }
+    }
+
+    throw 'Neither PowerShell 7 (pwsh.exe) nor Windows PowerShell (powershell.exe) was found. One of them is required for out-of-process Planet Crafter assembly patching.'
 }
 
 function Import-PCSMonoCecil {
@@ -1778,16 +1859,7 @@ function Invoke-PCSPatchAssembly {
 
     $resolvedAssemblyPath = Resolve-PCSPath -Path $AssemblyPath
     if (-not $PSBoundParameters.ContainsKey('OutputPath')) {
-        $pwshPath = if ($PSVersionTable.PSEdition -eq 'Core') {
-            Join-Path $PSHOME 'pwsh.exe'
-        }
-        else {
-            'C:\Program Files\PowerShell\7\pwsh.exe'
-        }
-
-        if (-not (Test-Path -LiteralPath $pwshPath)) {
-            throw "PowerShell 7 was not found at '$pwshPath'. It is required for out-of-process Planet Crafter assembly patching."
-        }
+        $powerShellHostPath = Get-PCSPowerShellHostPath
 
         $moduleManifestPath = Join-Path $PSScriptRoot 'PlanetCrafterServer.psd1'
         $backupPath = $resolvedAssemblyPath + '.PlanetCrafterServer.orig'
@@ -1804,7 +1876,7 @@ Import-Module '$moduleManifestPath' -Force
 } '$patchSourcePath' '$patchedOutputPath'
 "@ | Set-Content -LiteralPath $childScriptPath -Encoding UTF8
 
-            $childOutput = & $pwshPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File $childScriptPath 2>&1 | Out-String -Width 500
+            $childOutput = & $powerShellHostPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File $childScriptPath 2>&1 | Out-String -Width 500
             if ($LASTEXITCODE -ne 0) {
                 throw "Out-of-process Planet Crafter patching failed. Output:`n$childOutput"
             }
@@ -3097,7 +3169,8 @@ Dying consequences preset to use for the generated fresh save.
 Optional world seed to use when generating a fresh save request.
 
 .PARAMETER NewSaveRequestAfterInstall
-Stages a native new-save request in the instance save root. The patched game consumes the request
+Stages a native new-save request in the instance save root. Supplying any -NewSave* option implies
+this switch. The patched game consumes the request
 on its next main-menu startup; with -StartAfterInstall, that startup happens as part of the same
 install command. When -SelectedSavePath is omitted, the instance defaults it to the runtime save
 path for the generated save. When combined with -StartAfterInstall, install performs the
@@ -3225,6 +3298,20 @@ function Install-PlanetCrafterServer {
         $resolvedSelectedSavePath = Resolve-PCSPath -Path $SelectedSavePath
     }
 
+    $hasNewSaveOptions = @(
+        'NewSaveDisplayName',
+        'NewSavePlanetId',
+        'NewSaveGameMode',
+        'NewSaveStartLocation',
+        'NewSaveDyingConsequences',
+        'NewSaveWorldSeed'
+    ) | Where-Object { $PSBoundParameters.ContainsKey($_) } | Select-Object -First 1
+    $createNewSave = [bool]$NewSaveRequestAfterInstall -or [bool]$hasNewSaveOptions
+
+    if ($hasExplicitSelectedSavePath -and $createNewSave) {
+        throw "Use either -SelectedSavePath or the new-save options, not both. The new-save request and selected-save copy paths are mutually exclusive for install-time setup."
+    }
+
     if (-not $Name) {
         $Name = Split-Path -Leaf $resolvedInstallPath
     }
@@ -3242,8 +3329,15 @@ function Install-PlanetCrafterServer {
         $NewSaveDisplayName = Get-PCSNewSaveDisplayName -SaveFileName $SaveFileName
     }
 
-    if ($NewSaveRequestAfterInstall -and -not $hasExplicitSelectedSavePath) {
+    if ($createNewSave -and -not $hasExplicitSelectedSavePath) {
         $resolvedSelectedSavePath = Resolve-PCSPath -Path (Join-Path $resolvedSaveRoot $SaveFileName)
+    }
+
+    if ($StartAfterInstall -and -not $createNewSave -and -not $hasExplicitSelectedSavePath) {
+        $existingRuntimeSavePath = Join-Path $resolvedSaveRoot $SaveFileName
+        if (-not (Test-Path -LiteralPath $existingRuntimeSavePath)) {
+            throw "-StartAfterInstall needs a world to load, but no runtime save exists at '$existingRuntimeSavePath'. Add -NewSaveRequestAfterInstall (or any -NewSave* option) to generate one, or pass -SelectedSavePath to stage an existing save."
+        }
     }
 
     $conflict = @()
@@ -3328,10 +3422,6 @@ function Install-PlanetCrafterServer {
         Invoke-PCSPatchAssembly -AssemblyPath (Get-PCSAssemblyPath -Instance $instanceRecord) | Out-Null
     }
 
-    if ($hasExplicitSelectedSavePath -and $NewSaveRequestAfterInstall) {
-        throw "Use either -SelectedSavePath or a new-save request option set, not both. The new-save request and selected-save copy paths are mutually exclusive for install-time setup."
-    }
-
     if ($hasExplicitSelectedSavePath) {
         Copy-PCSSelectedSaveToRuntime -Instance $instanceRecord -SourceSavePath $resolvedSelectedSavePath | Out-Null
     }
@@ -3342,7 +3432,7 @@ function Install-PlanetCrafterServer {
     }
     Save-PCSInstanceRecord -Instance $instanceRecord
 
-    if ($NewSaveRequestAfterInstall) {
+    if ($createNewSave) {
         $newSaveSettings = @{
             SaveDisplayName = $NewSaveDisplayName
             PlanetId = if ($NewSavePlanetId) { $NewSavePlanetId } else { 'Prime' }
@@ -3357,7 +3447,7 @@ function Install-PlanetCrafterServer {
     }
 
     if ($StartAfterInstall) {
-        if ($NewSaveRequestAfterInstall) {
+        if ($createNewSave) {
             Assert-PCSPortAvailableForStart -Instance $instanceRecord
             Ensure-PCSInstanceReadyForStart -Instance $instanceRecord
             Write-PCSServerConfiguration -Instance $instanceRecord | Out-Null
@@ -3538,8 +3628,7 @@ function Set-PlanetCrafterServer {
     }
 
     if ($RestartIfRunning -and $wasRunning) {
-        Stop-PlanetCrafterServer -Name $instance.Name | Out-Null
-        Start-PlanetCrafterServer -Name $instance.Name | Out-Null
+        Restart-PlanetCrafterServer -Name $instance.Name | Out-Null
     }
 
     Get-PlanetCrafterServer -Name $instance.Name
@@ -3613,9 +3702,6 @@ Logical instance name of the server to start.
 .PARAMETER InstallPath
 Install path of the server to start.
 
-.PARAMETER ForceRestart
-Stops and restarts the server if it is already running.
-
 .PARAMETER ReadyTimeoutSeconds
 Maximum time to wait for the headless server to bind its UDP port.
 
@@ -3628,9 +3714,9 @@ Start-PlanetCrafterServer -Name PlanetCrafter_Server
 Starts the registered server if it is not already running.
 
 .EXAMPLE
-Start-PlanetCrafterServer -Name PlanetCrafter_Server -ForceRestart -RefreshSelectedSave -ReadyTimeoutSeconds 120
+Start-PlanetCrafterServer -Name PlanetCrafter_Server -RefreshSelectedSave -ReadyTimeoutSeconds 120
 
-Restarts the server, refreshes the runtime save, and waits up to two minutes for the UDP listener.
+Starts the server, refreshes the runtime save, and waits up to two minutes for the UDP listener.
 
 .NOTES
 This cmdlet refuses to start a server when another running server or process is already using the configured port. If the process starts but never binds its UDP port before the readiness timeout, the cmdlet terminates that failed start so it is not left behind as a half-started process.
@@ -3643,7 +3729,6 @@ function Start-PlanetCrafterServer {
     param(
         [string]$Name,
         [string]$InstallPath,
-        [switch]$ForceRestart,
         [int]$ReadyTimeoutSeconds = $script:DefaultReadyTimeoutSeconds,
         [switch]$RefreshSelectedSave
     )
@@ -3651,16 +3736,12 @@ function Start-PlanetCrafterServer {
     $instance = Resolve-PCSInstance -Name $Name -InstallPath $InstallPath
     $running = @(Get-PCSProcessObjects -Instance $instance)
 
-    if ($running.Count -gt 0 -and -not $ForceRestart) {
+    if ($running.Count -gt 0) {
         return Get-PlanetCrafterServer -Name $instance.Name
     }
 
     if (-not $PSCmdlet.ShouldProcess($instance.Name, 'Start Planet Crafter server')) {
         return
-    }
-
-    if ($running.Count -gt 0 -and $ForceRestart) {
-        Stop-PlanetCrafterServer -Name $instance.Name | Out-Null
     }
 
     Assert-PCSPortAvailableForStart -Instance $instance
@@ -3714,6 +3795,61 @@ function Start-PlanetCrafterServer {
     Get-PlanetCrafterServer -Name $instance.Name
 }
 
+<#
+.SYNOPSIS
+Restarts a registered Planet Crafter headless server instance.
+
+.DESCRIPTION
+Restart-PlanetCrafterServer stops the instance if it is running and then starts it again, waiting for
+the configured UDP listener to bind. It also works for an instance that is currently stopped.
+
+.PARAMETER Name
+Logical instance name of the server to restart.
+
+.PARAMETER InstallPath
+Install path of the server to restart.
+
+.PARAMETER ReadyTimeoutSeconds
+Maximum time to wait for the headless server to bind its UDP port.
+
+.PARAMETER RefreshSelectedSave
+Copies the configured selected save into the runtime save slot before starting.
+
+.EXAMPLE
+Restart-PlanetCrafterServer -Name PlanetCrafter_Server
+
+Stops the running server and starts it again.
+
+.EXAMPLE
+Restart-PlanetCrafterServer -Name PlanetCrafter_Server -RefreshSelectedSave -ReadyTimeoutSeconds 120
+
+Restarts the server, refreshes the runtime save, and waits up to two minutes for the UDP listener.
+
+.OUTPUTS
+PlanetCrafterServer.Info
+#>
+function Restart-PlanetCrafterServer {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [string]$Name,
+        [string]$InstallPath,
+        [int]$ReadyTimeoutSeconds = $script:DefaultReadyTimeoutSeconds,
+        [switch]$RefreshSelectedSave
+    )
+
+    $instance = Resolve-PCSInstance -Name $Name -InstallPath $InstallPath
+
+    if (-not $PSCmdlet.ShouldProcess($instance.Name, 'Restart Planet Crafter server')) {
+        return
+    }
+
+    if (@(Get-PCSProcessObjects -Instance $instance).Count -gt 0) {
+        Stop-PlanetCrafterServer -Name $instance.Name | Out-Null
+    }
+
+    Start-PlanetCrafterServer -Name $instance.Name -ReadyTimeoutSeconds $ReadyTimeoutSeconds -RefreshSelectedSave:$RefreshSelectedSave
+}
+
 function Get-PCSNewSaveDisplayName {
     param(
         [Parameter(Mandatory = $true)]
@@ -3743,27 +3879,39 @@ function Resolve-PCSNewSaveStartLocationValue {
         return 'Standard'
     }
 
-    $normalizedPlanetId = if ([string]::IsNullOrWhiteSpace($PlanetId)) { 'prime' } else { $PlanetId.Trim().ToLowerInvariant() }
-    $normalizedStartLocation = $StartLocation.Trim()
-    $lookup = $normalizedStartLocation.ToLowerInvariant()
-
-    switch ($normalizedPlanetId) {
-        'prime' {
-            switch ($lookup) {
-                'grand rift' { return 'GrandRift' }
-                'sand falls' { return 'SandFalls' }
-                'meteor crater' { return 'MeteorCrater' }
-                'ice plains' { return 'IcePlains' }
-            }
-        }
-        'humble' {
-            switch ($lookup) {
-                'spaceship arrival' { return 'SpaceshipArrival' }
-            }
-        }
+    # Keys are lowercased with whitespace removed; values are the exact spawn ids the game stores.
+    $startLocationIdMap = @{
+        'standard'         = 'Standard'
+        'random'           = 'Anywhere'
+        'anywhere'         = 'Anywhere'
+        'crater'           = 'Crater'
+        'meteorcrater'     = 'Crater'
+        'grandrift'        = 'GrandRift'
+        'sandfalls'        = 'SandFalls'
+        'iceplains'        = 'Iceplains'
+        'icyplains'        = 'Iceplains'
+        'waterfall'        = 'Waterfall'
+        'dam'              = 'ToxicityPrison'
+        'toxicityprison'   = 'ToxicityPrison'
+        'spaceshiparrival' = 'HumbleLanding'
+        'humblelanding'    = 'HumbleLanding'
     }
 
-    return $normalizedStartLocation
+    $lookup = ($StartLocation -replace '\s', '').ToLowerInvariant()
+    $resolvedId = if ($startLocationIdMap.ContainsKey($lookup)) { $startLocationIdMap[$lookup] } else { 'Standard' }
+
+    # Fall back to Standard when the id is not a spawn point on the chosen planet, mirroring the game UI.
+    $planetSpawnIds = @(
+        Get-PCSNewSaveStartLocationCandidates -PlanetId $PlanetId | ForEach-Object {
+            $candidateLookup = ($_.Value -replace '\s', '').ToLowerInvariant()
+            if ($startLocationIdMap.ContainsKey($candidateLookup)) { $startLocationIdMap[$candidateLookup] }
+        }
+    )
+    if ($planetSpawnIds -notcontains $resolvedId) {
+        return 'Standard'
+    }
+
+    return $resolvedId
 }
 
 function Write-PCSNewSaveRequest {
@@ -4286,8 +4434,9 @@ Removes a registered Planet Crafter server instance and optionally its save data
 
 .DESCRIPTION
 Uninstall-PlanetCrafterServer stops the server, removes module metadata, deletes firewall rules,
-deletes the install folder, and optionally removes the runtime save and Server.conf files. Use
--WhatIf to preview the removal without changing the working server.
+deletes the entire install folder, and optionally removes the save data. When the instance uses a
+dedicated save folder, that whole folder is deleted as well; otherwise only the runtime save and
+Server.conf files are removed. Use -WhatIf to preview the removal without changing the working server.
 
 .PARAMETER Name
 Logical instance name of the server to uninstall.
@@ -4336,16 +4485,32 @@ function Uninstall-PlanetCrafterServer {
     Remove-PCSFirewallRules -Instance $instance
 
     if (-not $KeepSaveData) {
-        foreach ($path in @($runtimeSavePath, $serverConfigPath)) {
-            if (Test-Path -LiteralPath $path) {
-                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-                $removedPaths += ,$path
+        $instanceSaveRoot = Resolve-PCSPath -Path $instance.SaveRootPath
+        $sharedSaveRoots = @(Resolve-PCSPath -Path (Get-PCSDefaultSaveRoot))
+        foreach ($other in @(Get-PCSRegisteredInstances | Where-Object { $_.Name -ne $instance.Name })) {
+            if ($other.SaveRootPath) {
+                $sharedSaveRoots += ,(Resolve-PCSPath -Path $other.SaveRootPath)
+            }
+        }
+
+        $saveRootIsDedicated = -not ($sharedSaveRoots | Where-Object { $_.TrimEnd('\') -eq $instanceSaveRoot.TrimEnd('\') })
+
+        if ($saveRootIsDedicated -and (Test-Path -LiteralPath $instanceSaveRoot)) {
+            Remove-PCSDirectoryTree -Path $instanceSaveRoot
+            $removedPaths += ,$instanceSaveRoot
+        }
+        else {
+            foreach ($path in @($runtimeSavePath, $serverConfigPath)) {
+                if (Test-Path -LiteralPath $path) {
+                    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                    $removedPaths += ,$path
+                }
             }
         }
     }
 
     if (Test-Path -LiteralPath $instance.InstallPath) {
-        Remove-Item -LiteralPath $instance.InstallPath -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-PCSDirectoryTree -Path $instance.InstallPath
         $removedPaths += ,$instance.InstallPath
     }
 
@@ -4355,7 +4520,7 @@ function Uninstall-PlanetCrafterServer {
     }
 
     if (Test-Path -LiteralPath $backupRoot) {
-        Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-PCSDirectoryTree -Path $backupRoot
         $removedPaths += ,$backupRoot
     }
 
@@ -4424,8 +4589,7 @@ function New-PCSCompletionResult {
         [Parameter(Mandatory = $true)]
         [string]$CompletionValue,
         [string]$ListItemText,
-        [string]$ToolTip,
-        [switch]$Quote
+        [string]$ToolTip
     )
 
     if (-not $ListItemText) {
@@ -4436,7 +4600,7 @@ function New-PCSCompletionResult {
         $ToolTip = $CompletionValue
     }
 
-    $completionText = if ($Quote) { ConvertTo-PCSCompletionText -Text $CompletionValue } else { $CompletionValue }
+    $completionText = ConvertTo-PCSCompletionText -Text $CompletionValue
     [System.Management.Automation.CompletionResult]::new($completionText, $ListItemText, 'ParameterValue', $ToolTip)
 }
 
@@ -4532,7 +4696,7 @@ function Complete-PCSRegisteredInstallPath {
 
     foreach ($instance in $matched) {
         if ($instance.InstallPath -and (Test-Path -LiteralPath $instance.InstallPath)) {
-            New-PCSCompletionResult -CompletionValue $instance.InstallPath -ToolTip $instance.Name -Quote
+            New-PCSCompletionResult -CompletionValue $instance.InstallPath -ToolTip $instance.Name
         }
     }
 }
@@ -4542,7 +4706,7 @@ function Complete-PCSInstallSourcePath {
 
     foreach ($path in @(Get-PCSCompletionCommonInstallCandidates)) {
         if ((Test-Path -LiteralPath $path) -and (Test-PCSCompletionAnyMatch -Candidates @($path, (Split-Path -Leaf $path)) -WordToComplete $WordToComplete)) {
-            New-PCSCompletionResult -CompletionValue $path -ToolTip 'Planet Crafter source path' -Quote
+            New-PCSCompletionResult -CompletionValue $path -ToolTip 'Planet Crafter source path'
         }
     }
 }
@@ -4552,7 +4716,7 @@ function Complete-PCSSteamCmdPath {
 
     foreach ($path in @(Get-PCSCompletionCommonSteamCmdCandidates)) {
         if ((Test-Path -LiteralPath $path) -and (Test-PCSCompletionAnyMatch -Candidates @($path, (Split-Path -Leaf $path)) -WordToComplete $WordToComplete)) {
-            New-PCSCompletionResult -CompletionValue $path -ToolTip 'steamcmd.exe' -Quote
+            New-PCSCompletionResult -CompletionValue $path -ToolTip 'steamcmd.exe'
         }
     }
 }
@@ -4562,7 +4726,7 @@ function Complete-PCSSaveRootPath {
 
     foreach ($path in @(Get-PCSCompletionSaveRootsFromContext -FakeBoundParameters $FakeBoundParameters)) {
         if ((Test-Path -LiteralPath $path) -and (Test-PCSCompletionAnyMatch -Candidates @($path, (Split-Path -Leaf $path)) -WordToComplete $WordToComplete)) {
-            New-PCSCompletionResult -CompletionValue $path -ToolTip 'Planet Crafter save root' -Quote
+            New-PCSCompletionResult -CompletionValue $path -ToolTip 'Planet Crafter save root'
         }
     }
 }
@@ -4732,7 +4896,7 @@ function Complete-PCSNewSaveDisplayName {
 
     foreach ($name in @($names | Select-Object -Unique)) {
         if (Test-PCSCompletionMatch -Candidate $name -WordToComplete $WordToComplete) {
-            New-PCSCompletionResult -CompletionValue $name -Quote
+            New-PCSCompletionResult -CompletionValue $name
         }
     }
 }
@@ -4770,7 +4934,7 @@ function Complete-PCSNewSaveStartLocation {
 
     foreach ($candidate in Get-PCSNewSaveStartLocationCandidates -PlanetId $planetId) {
         if (Test-PCSCompletionMatch -Candidate $candidate.Value -WordToComplete $WordToComplete) {
-            New-PCSCompletionResult -CompletionValue $candidate.Value -ToolTip $candidate.Description -Quote
+            New-PCSCompletionResult -CompletionValue $candidate.Value -ToolTip $candidate.Description
         }
     }
 }
@@ -4815,7 +4979,7 @@ function Complete-PCSSavePath {
 
         foreach ($file in Get-ChildItem -LiteralPath $root -Filter '*.json' -File -ErrorAction SilentlyContinue) {
             if (Test-PCSCompletionAnyMatch -Candidates @($file.FullName, $file.Name, [System.IO.Path]::GetFileNameWithoutExtension($file.Name)) -WordToComplete $WordToComplete) {
-                New-PCSCompletionResult -CompletionValue $file.FullName -ToolTip $file.Name -Quote
+                New-PCSCompletionResult -CompletionValue $file.FullName -ToolTip $file.Name
             }
         }
     }
@@ -4871,6 +5035,7 @@ function Initialize-PCSArgumentCompleters {
     Register-PCSCompleter -CommandName @(
         'Get-PlanetCrafterServer',
         'Start-PlanetCrafterServer',
+        'Restart-PlanetCrafterServer',
         'New-PlanetCrafterServerSave',
         'Save-PlanetCrafterServer',
         'Complete-PlanetCrafterServerIntro',
@@ -4883,6 +5048,7 @@ function Initialize-PCSArgumentCompleters {
     Register-PCSCompleter -CommandName @(
         'Get-PlanetCrafterServer',
         'Start-PlanetCrafterServer',
+        'Restart-PlanetCrafterServer',
         'New-PlanetCrafterServerSave',
         'Save-PlanetCrafterServer',
         'Complete-PlanetCrafterServerIntro',
@@ -4916,6 +5082,7 @@ function Initialize-PCSArgumentCompleters {
 Export-ModuleMember -Function @(
     'Get-PlanetCrafterServer',
     'Start-PlanetCrafterServer',
+    'Restart-PlanetCrafterServer',
     'New-PlanetCrafterServerSave',
     'Save-PlanetCrafterServer',
     'Complete-PlanetCrafterServerIntro',
@@ -4926,4 +5093,5 @@ Export-ModuleMember -Function @(
 )
 
 Initialize-PCSArgumentCompleters
+
 

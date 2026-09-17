@@ -17,26 +17,16 @@ catch {
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $moduleRoot = Join-Path $repoRoot 'PlanetCrafterServer-module/PlanetCrafterServer'
 
-$existingVersionDir = Get-ChildItem -Path $moduleRoot -Directory |
-    Sort-Object { [version]$_.Name } |
-    Select-Object -Last 1
+$manifestPath = Join-Path $moduleRoot 'PlanetCrafterServer.psd1'
+$modulePath = Join-Path $moduleRoot 'PlanetCrafterServer.psm1'
 
-if (-not $existingVersionDir) {
-    throw "No versioned module folder was found under $moduleRoot."
+foreach ($path in @($manifestPath, $modulePath)) {
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "Module file '$path' was not found."
+    }
 }
 
-$currentVersion = $existingVersionDir.Name
-$sourceDir = $existingVersionDir.FullName
-$targetDir = Join-Path $moduleRoot $NewVersion
-
-if (Test-Path -LiteralPath $targetDir) {
-    throw "A module folder already exists for version '$NewVersion'."
-}
-
-Rename-Item -LiteralPath $sourceDir -NewName $NewVersion
-
-$manifestPath = Join-Path $targetDir 'PlanetCrafterServer.psd1'
-$modulePath = Join-Path $targetDir 'PlanetCrafterServer.psm1'
+$currentVersion = (Import-PowerShellDataFile -Path $manifestPath).ModuleVersion
 
 $manifestContent = Get-Content -LiteralPath $manifestPath -Raw
 $manifestContent = [regex]::Replace(
@@ -55,7 +45,6 @@ $moduleContent = [regex]::Replace(
 Set-Content -LiteralPath $modulePath -Value $moduleContent -Encoding UTF8
 
 Write-Host "Updated module version from $currentVersion to $NewVersion."
-Write-Host "Folder renamed to $targetDir"
 Write-Host "Next steps:"
 Write-Host "  git add ."
 Write-Host "  git commit -m 'Bump module version to $NewVersion'"
