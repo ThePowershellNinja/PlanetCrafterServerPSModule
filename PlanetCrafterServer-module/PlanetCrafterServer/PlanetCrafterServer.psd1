@@ -1,6 +1,6 @@
 @{
     RootModule           = 'PlanetCrafterServer.psm1'
-    ModuleVersion        = '0.1.2'
+    ModuleVersion        = '0.1.3'
     GUID                 = '7a7d42d1-b6ea-4e62-b981-7299f4a178ce'
     Author               = 'Micah Battin'
     CompanyName          = ''
@@ -31,5 +31,6 @@
         }
     }
 }
+
 
 
